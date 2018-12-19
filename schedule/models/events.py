@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
+import pytz
+import datetime
+from dateutil import rrule
+
 from django.contrib.contenttypes import fields
 from django.db import models
 from django.db.models import Q
-from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.urlresolvers import reverse
 from django.template.defaultfilters import date
 from django.utils.translation import ugettext, ugettext_lazy as _
-import datetime
-from dateutil import rrule
+
+from schedule.conf import settings
 from schedule.models.rules import Rule
 from schedule.models.calendars import Calendar
 from schedule.utils import OccurrenceReplacer
+from django.utils import timezone
 
 class EventManager(models.Manager):
 
@@ -27,11 +31,11 @@ class Event(models.Model):
     end = models.DateTimeField(_("end"),help_text=_("The end time must be later than the start time."))
     title = models.CharField(_("title"), max_length = 255)
     description = models.TextField(_("description"), null = True, blank = True)
-    creator = models.ForeignKey(User, null = True, verbose_name=_("creator"))
-    created_on = models.DateTimeField(_("created on"), default = datetime.datetime.now)
+    creator = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, verbose_name=_("creator"), related_name='creator')
+    created_on = models.DateTimeField(_("created on"), default = timezone.now)
     rule = models.ForeignKey(Rule, null = True, blank = True, verbose_name=_("rule"), help_text=_("Select '----' for a one time only event."))
     end_recurring_period = models.DateTimeField(_("end recurring period"), null = True, blank = True, help_text=_("This date is ignored for one time only events."))
-    calendar = models.ForeignKey(Calendar, blank=True)
+    calendar = models.ForeignKey(Calendar, null=True, blank=True)
     objects = EventManager()
 
     class Meta:
@@ -40,12 +44,13 @@ class Event(models.Model):
         app_label = 'schedule'
 
     def __unicode__(self):
-        date_format = u'l, %s' % ugettext("DATE_FORMAT")
-        return ugettext('%(title)s: %(start)s-%(end)s') % {
+        date_format = u'%s' % ugettext("DATE_FORMAT")
+        return ugettext('%(title)s: %(start)s - %(end)s') % {
             'title': self.title,
             'start': date(self.start, date_format),
             'end': date(self.end, date_format),
         }
+
 
     def get_absolute_url(self):
         return reverse('event', args=[self.id])
@@ -60,12 +65,12 @@ class Event(models.Model):
         """
         >>> rule = Rule(frequency = "MONTHLY", name = "Monthly")
         >>> rule.save()
-        >>> event = Event(rule=rule, start=datetime.datetime(2008,1,1), end=datetime.datetime(2008,1,2))
+        >>> event = Event(rule=rule, start=datetime.datetime(2008,1,1,tzinfo=pytz.utc), end=datetime.datetime(2008,1,2))
         >>> event.rule
         <Rule: Monthly>
         >>> occurrences = event.get_occurrences(datetime.datetime(2008,1,24), datetime.datetime(2008,3,2))
         >>> ["%s to %s" %(o.start, o.end) for o in occurrences]
-        ['2008-02-01 00:00:00 to 2008-02-02 00:00:00', '2008-03-01 00:00:00 to 2008-03-02 00:00:00']
+        ['2008-02-01 00:00:00+00:00 to 2008-02-02 00:00:00+00:00', '2008-03-01 00:00:00+00:00 to 2008-03-02 00:00:00+00:00']
 
         Ensure that if an event has no rule, that it appears only once.
 
@@ -73,7 +78,7 @@ class Event(models.Model):
         >>> occurrences = event.get_occurrences(datetime.datetime(2008,1,24), datetime.datetime(2008,3,2))
         >>> ["%s to %s" %(o.start, o.end) for o in occurrences]
         []
-
+`
         """
         persisted_occurrences = self.occurrence_set.all()
         occ_replacer = OccurrenceReplacer(persisted_occurrences)
@@ -106,6 +111,8 @@ class Event(models.Model):
         return Occurrence(event=self,start=start,end=end, original_start=start, original_end=end)
 
     def get_occurrence(self, date):
+        if timezone.is_naive(date):
+            date = timezone.make_aware(date, timezone.utc)
         rule = self.get_rrule_object()
         if rule:
             next_occurrence = rule.after(date, inc=True)
@@ -128,26 +135,26 @@ class Event(models.Model):
             if self.end_recurring_period and self.end_recurring_period < end:
                 end = self.end_recurring_period
             rule = self.get_rrule_object()
-            o_starts = rule.between(start-difference, end, inc=True)
+            o_starts = rule.between(start-difference, end-difference, inc=True)
             for o_start in o_starts:
                 o_end = o_start + difference
                 occurrences.append(self._create_occurrence(o_start, o_end))
             return occurrences
         else:
             # check if event is in the period
-            if self.start < end and self.end >= start:
+            if self.start < end and self.end > start:
                 return [self._create_occurrence(self.start)]
             else:
                 return []
 
-    def _occurrences_after_generator(self, after=None):
+    def _occurrences_after_generator(self, after=None, tzinfo=pytz.utc):
         """
         returns a generator that produces unpresisted occurrences after the
         datetime ``after``.
         """
 
         if after is None:
-            after = datetime.datetime.now()
+            after = timezone.now()
         rule = self.get_rrule_object()
         if rule is None:
             if self.end > after:
@@ -438,4 +445,4 @@ class Occurrence(models.Model):
         return rank
 
     def __eq__(self, other):
-        return self.event == other.event and self.original_start == other.original_start and self.original_end == other.original_end
+        return self.original_start == other.original_start and self.original_end == other.original_end

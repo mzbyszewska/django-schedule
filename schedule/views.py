@@ -1,17 +1,19 @@
+import datetime
 from urllib import quote
-from django.shortcuts import render_to_response, get_object_or_404
-from django.views.generic.create_update import delete_object
+
+from django.contrib import messages
+from django.shortcuts import render, render_to_response, get_object_or_404
+from django.utils import timezone
 from django.http import HttpResponseRedirect, Http404, HttpResponse
 from django.template import RequestContext
-from django.core.urlresolvers import reverse
-from django.contrib.auth.models import User
-from django.contrib.auth.decorators import login_required
-from django.views.generic.create_update import delete_object
-import datetime
+from django.core.urlresolvers import reverse, reverse_lazy
+from django.shortcuts import render
+from django.views.generic.edit import DeleteView
+# from django.views.generic.create_update import delete_object
 
 from schedule.conf.settings import GET_EVENTS_FUNC, OCCURRENCE_CANCEL_REDIRECT
 from schedule.forms import EventForm, OccurrenceForm
-from schedule.models import *
+from schedule.models import Calendar, Occurrence, Event
 from schedule.periods import weekday_names
 from schedule.utils import check_event_permissions, coerce_date_dict
 
@@ -28,9 +30,9 @@ def calendar(request, calendar_slug, template='schedule/calendar.html'):
         The Calendar object designated by the ``calendar_slug``.
     """
     calendar = get_object_or_404(Calendar, slug=calendar_slug)
-    return render_to_response(template, {
+    return render(request, template, {
         "calendar": calendar,
-    }, context_instance=RequestContext(request))
+    }, )
 
 def calendar_by_periods(request, calendar_slug, periods=None,
     template_name="schedule/calendar_by_period.html"):
@@ -74,16 +76,16 @@ def calendar_by_periods(request, calendar_slug, periods=None,
         except ValueError:
             raise Http404
     else:
-        date = datetime.datetime.now()
+        date = timezone.now()
     event_list = GET_EVENTS_FUNC(request, calendar)
     period_objects = dict([(period.__name__.lower(), period(event_list, date)) for period in periods])
-    return render_to_response(template_name,{
+    return render(request, template_name,{
             'date': date,
             'periods': period_objects,
             'calendar': calendar,
             'weekday_names': weekday_names,
             'here':quote(request.get_full_path()),
-        },context_instance=RequestContext(request),)
+        },)
 
 def event(request, event_id, template_name="schedule/event.html"):
     """
@@ -101,15 +103,15 @@ def event(request, event_id, template_name="schedule/event.html"):
         this is the url that referred to this view.
     """
     event = get_object_or_404(Event, id=event_id)
-    back_url = request.META.get('HTTP_REFERER', None)
+    #back_url = request.META.get('HTTP_REFERER', None)
     try:
         cal = event.calendar_set.get()
     except:
         cal = None
-    return render_to_response(template_name, {
+    return render(request, template_name, {
         "event": event,
-        "back_url" : back_url,
-    }, context_instance=RequestContext(request))
+        "back_url" : None,
+    })
 
 def occurrence(request, event_id,
     template_name="schedule/occurrence.html", *args, **kwargs):
@@ -129,11 +131,11 @@ def occurrence(request, event_id,
     """
     event, occurrence = get_occurrence(event_id, *args, **kwargs)
     back_url = request.META.get('HTTP_REFERER', None)
-    return render_to_response(template_name, {
+    return render(request, template_name, {
         'event': event,
         'occurrence': occurrence,
         'back_url': back_url,
-    }, context_instance=RequestContext(request))
+    }, )
 
 
 @check_event_permissions
@@ -149,11 +151,11 @@ def edit_occurrence(request, event_id,
         next = next or get_next_url(request, occurrence.get_absolute_url())
         return HttpResponseRedirect(next)
     next = next or get_next_url(request, occurrence.get_absolute_url())
-    return render_to_response(template_name, {
+    return render(request, template_name, {
         'form': form,
         'occurrence': occurrence,
         'next':next,
-    }, context_instance=RequestContext(request))
+    }, )
 
 
 @check_event_permissions
@@ -167,10 +169,10 @@ def cancel_occurrence(request, event_id,
     event, occurrence = get_occurrence(event_id, *args, **kwargs)
     next = kwargs.get('next',None) or get_next_url(request, event.get_absolute_url())
     if request.method != "POST":
-        return render_to_response(template_name, {
+        return render(request, template_name, {
             "occurrence": occurrence,
             "next":next,
-        }, context_instance=RequestContext(request))
+        }, )
     occurrence.cancel()
     return HttpResponseRedirect(next)
 
@@ -267,34 +269,57 @@ def create_or_edit_event(request, calendar_slug, event_id=None, next=None,
         return HttpResponseRedirect(next)
 
     next = get_next_url(request, next)
-    return render_to_response(template_name, {
+    return render(request, template_name, {
         "form": form,
         "calendar": calendar,
         "next":next
-    }, context_instance=RequestContext(request))
+    }, )
 
 
-@check_event_permissions
-def delete_event(request, event_id, next=None, login_required=True):
-    """
-    After the event is deleted there are three options for redirect, tried in
-    this order:
+class EventDeleteView(DeleteView):
 
-    # Try to find a 'next' GET variable
-    # If the key word argument redirect is set
-    # Lastly redirect to the event detail of the recently create event
-    """
-    event = get_object_or_404(Event, id=event_id)
-    next = next or reverse('day_calendar', args=[event.calendar.slug])
-    next = get_next_url(request, next)
-    return delete_object(request,
-                         model = Event,
-                         object_id = event_id,
-                         post_delete_redirect = next,
-                         template_name = "schedule/delete_event.html",
-                         extra_context = dict(next=next),
-                         login_required = login_required
-                        )
+    template_name =  'schedule/event_confirm_delete.html'
+    model = Event
+    def get_object(self, queryset=None):
+        next = self.get_success_url()
+        """ Hook to ensure object is owned by request.user. """
+        obj = super(EventDeleteView, self).get_object()
+        if not obj.creator == self.request.user:
+            #response_data = {'owner': 'False', 'url_back': self.get_success_url() }
+            #response = render(self.request, self.template_name, response_data)
+            #return HttpResponse(response)
+            messages.error(self.request, '<span class="errorlist">You are not the owner of this event!</span><br /><br /> <input type="button" value="Reload" onclick="window.location=\'{0}\'">'.format( next))
+            raise Http404()
+        return obj
+
+    def get_success_url(self):
+        plum = self.request.get_full_path()
+        next = plum.split('=')[1]
+        next = get_next_url(self.request, next)
+        return next
+
+#@check_event_permissions
+#def delete_event(request, event_id, next=None, login_required=True):
+    #"""
+    #After the event is deleted there are three options for redirect, tried in
+    #this order:
+
+    ## Try to find a 'next' GET variable
+    ## If the key word argument redirect is set
+    ## Lastly redirect to the event detail of the recently create event
+    #"""
+    #event = get_object_or_404(Event, id=event_id)
+    #next = next or reverse('day_calendar', args=[event.calendar.slug])
+    #next = get_next_url(request, next)
+    ##TODO: migratis this view http://dashdrum.com/blog/2011/11/class-based-views-deleteview-example/
+    #return delete_object(request,
+                         #model = Event,
+                         #object_id = event_id,
+                         #post_delete_redirect = next,
+                         #template_name = "schedule/delete_event.html",
+                         #extra_context = dict(next=next),
+                         #login_required = login_required
+                        #)
 
 def check_next_url(next):
     """
@@ -309,6 +334,6 @@ def get_next_url(request, default):
     next = default
     if OCCURRENCE_CANCEL_REDIRECT:
         next = OCCURRENCE_CANCEL_REDIRECT
-    if 'next' in request.REQUEST and check_next_url(request.REQUEST['next']) is not None:
-        next = request.REQUEST['next']
+    if 'next' in request.GET and check_next_url(request.GET['next']) is not None:
+        next = request.GET['next']
     return next
